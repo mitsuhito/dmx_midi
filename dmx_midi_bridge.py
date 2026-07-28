@@ -15,6 +15,7 @@ import collections
 import curses
 import logging
 import queue
+import random
 import socket
 import threading
 import time
@@ -98,7 +99,10 @@ class EnttecDMXReader(threading.Thread):
 ARTNET_HEADER = b"Art-Net\x00"
 ARTNET_OP_DMX = 0x5000
 ARTNET_OP_SYNC = 0x5200
+ARTNET_OP_POLL = 0x2000
+ARTNET_OP_POLL_REPLY = 0x2100
 ARTNET_SYNC_TIMEOUT = 4.0  # seconds; per spec, revert to non-sync mode after this
+ARTNET_STYLE_NODE = 0x00
 
 
 class ArtNetReceiver(threading.Thread):
@@ -107,14 +111,20 @@ class ArtNetReceiver(threading.Thread):
     channel 1 (Art-Net DMX data has no leading start code, unlike the
     Enttec USB frame).
 
-    Also supports ArtSync (OpCode 0x5200), per the Art-Net spec: a node
-    starts in non-synchronous mode (ArtDmx applied immediately on receipt).
-    Once it receives an ArtSync packet, it switches to synchronous mode:
-    subsequent ArtDmx is buffered and only applied when the next ArtSync
-    arrives. If no ArtSync is received for 4+ seconds, it reverts to
-    non-synchronous mode. An ArtSync is ignored if it comes from a
-    different source IP than the most recent ArtDmx (multi-controller
-    guard, per spec)."""
+    Also supports:
+    - ArtSync (0x5200): a node starts in non-synchronous mode (ArtDmx
+      applied immediately on receipt). Once it receives an ArtSync packet,
+      it switches to synchronous mode: subsequent ArtDmx is buffered and
+      only applied when the next ArtSync arrives. If no ArtSync is
+      received for 4+ seconds, it reverts to non-synchronous mode. An
+      ArtSync is ignored if it comes from a different source IP than the
+      most recent ArtDmx (multi-controller guard, per spec).
+    - ArtPoll (0x2000): replies with a unicast ArtPollReply (0x2100) so
+      this bridge shows up as a discoverable node in QLC+/OLA/etc,
+      honoring Targeted Mode's Port-Address range if set. Per spec, the
+      reply is sent after a random 0-1s delay to avoid reply storms; this
+      is scheduled on a timer rather than blocking the receive loop.
+    """
 
     def __init__(self, on_frame, bind_address="0.0.0.0", port=6454, universe=0):
         super().__init__(daemon=True)
@@ -153,7 +163,7 @@ class ArtNetReceiver(threading.Thread):
                 except socket.timeout:
                     self._check_sync_timeout()
                     continue
-                self._handle_packet(packet, addr[0])
+                self._handle_packet(packet, addr)
         finally:
             self._sock.close()
 
@@ -161,12 +171,15 @@ class ArtNetReceiver(threading.Thread):
         if self._sync_mode and (time.time() - self._last_sync_at) > ARTNET_SYNC_TIMEOUT:
             self._sync_mode = False
 
-    def _handle_packet(self, packet, source_ip):
+    def _handle_packet(self, packet, addr):
         if len(packet) < 10 or not packet.startswith(ARTNET_HEADER):
             return
         opcode = packet[8] | (packet[9] << 8)
         if opcode == ARTNET_OP_SYNC:
-            self._handle_sync(source_ip)
+            self._handle_sync(addr[0])
+            return
+        if opcode == ARTNET_OP_POLL:
+            self._handle_poll(packet, addr)
             return
         if opcode != ARTNET_OP_DMX or len(packet) < 18:
             return
@@ -177,7 +190,7 @@ class ArtNetReceiver(threading.Thread):
             return
         length = (packet[16] << 8) | packet[17]
         channels = packet[18 : 18 + length]
-        self._last_dmx_source = source_ip
+        self._last_dmx_source = addr[0]
         self._check_sync_timeout()
         if self._sync_mode:
             self._pending_channels = channels
@@ -192,6 +205,91 @@ class ArtNetReceiver(threading.Thread):
         if self._pending_channels is not None:
             self._on_frame(self._pending_channels)
             self._pending_channels = None
+
+    def _handle_poll(self, packet, addr):
+        flags = packet[12] if len(packet) > 12 else 0
+        targeted = bool(flags & 0x20)
+        if targeted and len(packet) >= 18:
+            top = (packet[14] << 8) | packet[15]
+            bottom = (packet[16] << 8) | packet[17]
+            if not (bottom <= self._universe <= top):
+                return
+        # Random 0-1s delay per spec, to avoid reply bunching; scheduled on
+        # a timer so it never blocks this thread from reading more packets.
+        delay = random.uniform(0, 1.0)
+        threading.Timer(delay, self._send_poll_reply, args=(addr,)).start()
+
+    def _local_ip_for(self, remote_ip):
+        """Best-effort: which local IP would the OS use to reach remote_ip?
+        Uses a UDP "connect" (route lookup only, sends nothing) so the
+        ArtPollReply reports the correct interface on a multi-homed host."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect((remote_ip, self._port))
+            return s.getsockname()[0]
+        except OSError:
+            return "0.0.0.0"
+        finally:
+            s.close()
+
+    @staticmethod
+    def _padded(data, size):
+        data = data[: size - 1]
+        return data + b"\x00" * (size - len(data))
+
+    def _build_poll_reply(self, local_ip):
+        ip_bytes = bytes(int(part) for part in local_ip.split("."))
+        net_switch = (self._universe >> 8) & 0x7F
+        sub_switch = (self._universe >> 4) & 0x0F
+        sw_out_low = self._universe & 0x0F
+
+        p = bytearray()
+        p += ARTNET_HEADER  # ID[8]
+        p += bytes([0x00, 0x21])  # OpCode = OpPollReply, low byte first
+        p += ip_bytes  # IP Address[4]
+        p += bytes([0x36, 0x19])  # Port = 0x1936, low byte first
+        p += bytes([0, 1])  # VersInfoH, VersInfoL
+        p += bytes([net_switch, sub_switch])  # NetSwitch, SubSwitch
+        p += bytes([0, 0])  # OemHi, Oem(Lo)
+        p += bytes([0])  # UbeaVersion
+        p += bytes([0])  # Status1
+        p += bytes([0, 0])  # EstaManLo, EstaManHi
+        p += self._padded(b"DMX2MIDI Bridge", 18)  # PortName[18]
+        p += self._padded(b"DMX to MIDI Bridge (dmx_midi_bridge.py)", 64)  # LongName[64]
+        p += self._padded(b"#0001 [0001] Ready", 64)  # NodeReport[64]
+        p += bytes([0, 1])  # NumPortsHi, NumPortsLo (1 port)
+        p += bytes([0x80, 0, 0, 0])  # PortTypes[4]: bit7 set = output-from-Art-Net, DMX512
+        p += bytes([0, 0, 0, 0])  # GoodInput[4] (we have no input-to-network port)
+        p += bytes([0, 0, 0, 0])  # GoodOutputA[4]
+        p += bytes([0, 0, 0, 0])  # SwIn[4]
+        p += bytes([sw_out_low, 0, 0, 0])  # SwOut[4]
+        p += bytes([100])  # AcnPriority
+        p += bytes([0])  # SwMacro
+        p += bytes([0])  # SwRemote
+        p += bytes([0, 0, 0])  # Spare x3
+        p += bytes([ARTNET_STYLE_NODE])  # Style
+        p += bytes([0, 0, 0, 0, 0, 0])  # MAC[6] (0 = not supplied)
+        p += bytes([0, 0, 0, 0])  # BindIp[4]
+        p += bytes([0])  # BindIndex
+        p += bytes([0])  # Status2
+        p += bytes([0, 0, 0, 0])  # GoodOutputB[4]
+        p += bytes([0])  # Status3: failsafe = 00 (hold last state, matches our behavior)
+        p += bytes([0, 0, 0, 0, 0, 0])  # DefaultRespUID[6]
+        p += bytes([0, 0])  # UserHi, UserLo
+        p += bytes([0, 44])  # RefreshRateHi, RefreshRateLo (44Hz)
+        p += bytes([0])  # BackgroundQueuePolicy
+        p += bytes(10)  # Filler
+        return bytes(p)
+
+    def _send_poll_reply(self, addr):
+        if self._sock is None:
+            return
+        try:
+            local_ip = self._local_ip_for(addr[0])
+            reply = self._build_poll_reply(local_ip)
+            self._sock.sendto(reply, addr)
+        except OSError:
+            logger.exception("Failed to send ArtPollReply to %s", addr)
 
 
 class DMXSimulator(threading.Thread):
