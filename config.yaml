@@ -1,0 +1,52 @@
+# DMX (Enttec DMX USB Pro or Art-Net) -> USB MIDI bridge configuration
+
+input:
+  # Which DMX input to use: "usb" (Enttec DMX USB Pro) or "artnet".
+  #mode: usb
+  mode: artnet
+
+serial:
+  # Used when input.mode is "usb".
+  # Serial device for the Enttec DMX USB Pro (FTDI virtual COM port).
+  # Run `python3 dmx_midi_bridge.py --list-serial-ports` to find it.
+  port: /dev/ttyUSB0
+  # The Widget's baud rate setting is a dummy value (USB speed is fixed),
+  # but pyserial still requires one to be specified.
+  baudrate: 57600
+
+artnet:
+  # Used when input.mode is "artnet".
+  # Address to listen on ("0.0.0.0" = all network interfaces).
+  bind_address: 0.0.0.0
+  port: 6454
+  # Art-Net universe number to accept (Net<<8 | SubNet<<4 | Universe).
+  universe: 0
+
+midi:
+  # "virtual" creates a virtual ALSA MIDI output port that other apps/synths
+  # can connect to (good for testing without hardware).
+  # Otherwise, set this to a substring of the target MIDI output port name
+  # (see `python3 dmx_midi_bridge.py --list-midi-ports`), e.g. "USB MIDI".
+  output: virtual
+  virtual_port_name: "DMX2MIDI"
+
+# DMX channel -> MIDI note mapping.
+# - dmx_channel: 1-512
+# - midi_channel: 1-16
+# - note: 0-127 (MIDI note number)
+# Behavior: when a mapped channel's value changes and is > 0, a Note On is
+# sent with velocity scaled from the DMX value (1-255 -> 1-127). When the
+# value changes to 0, a Note Off is sent.
+mappings:
+  - dmx_channel: 1
+    midi_channel: 1
+    note: 60
+  - dmx_channel: 2
+    midi_channel: 1
+    note: 61
+  - dmx_channel: 3
+    midi_channel: 1
+    note: 62
+  - dmx_channel: 4
+    midi_channel: 1
+    note: 63
