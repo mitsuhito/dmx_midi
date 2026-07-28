@@ -97,13 +97,24 @@ class EnttecDMXReader(threading.Thread):
 
 ARTNET_HEADER = b"Art-Net\x00"
 ARTNET_OP_DMX = 0x5000
+ARTNET_OP_SYNC = 0x5200
+ARTNET_SYNC_TIMEOUT = 4.0  # seconds; per spec, revert to non-sync mode after this
 
 
 class ArtNetReceiver(threading.Thread):
     """Listens for Art-Net ArtDMX UDP packets and invokes on_frame(channels)
     for packets matching the configured universe. channels[0] is DMX
     channel 1 (Art-Net DMX data has no leading start code, unlike the
-    Enttec USB frame)."""
+    Enttec USB frame).
+
+    Also supports ArtSync (OpCode 0x5200), per the Art-Net spec: a node
+    starts in non-synchronous mode (ArtDmx applied immediately on receipt).
+    Once it receives an ArtSync packet, it switches to synchronous mode:
+    subsequent ArtDmx is buffered and only applied when the next ArtSync
+    arrives. If no ArtSync is received for 4+ seconds, it reverts to
+    non-synchronous mode. An ArtSync is ignored if it comes from a
+    different source IP than the most recent ArtDmx (multi-controller
+    guard, per spec)."""
 
     def __init__(self, on_frame, bind_address="0.0.0.0", port=6454, universe=0):
         super().__init__(daemon=True)
@@ -113,6 +124,10 @@ class ArtNetReceiver(threading.Thread):
         self._universe = universe
         self._stop_event = threading.Event()
         self._sock = None
+        self._sync_mode = False
+        self._last_sync_at = 0.0
+        self._pending_channels = None
+        self._last_dmx_source = None
 
     def stop(self):
         self._stop_event.set()
@@ -134,18 +149,26 @@ class ArtNetReceiver(threading.Thread):
         try:
             while not self._stop_event.is_set():
                 try:
-                    packet, _addr = self._sock.recvfrom(1024)
+                    packet, addr = self._sock.recvfrom(1024)
                 except socket.timeout:
+                    self._check_sync_timeout()
                     continue
-                self._handle_packet(packet)
+                self._handle_packet(packet, addr[0])
         finally:
             self._sock.close()
 
-    def _handle_packet(self, packet):
-        if len(packet) < 18 or not packet.startswith(ARTNET_HEADER):
+    def _check_sync_timeout(self):
+        if self._sync_mode and (time.time() - self._last_sync_at) > ARTNET_SYNC_TIMEOUT:
+            self._sync_mode = False
+
+    def _handle_packet(self, packet, source_ip):
+        if len(packet) < 10 or not packet.startswith(ARTNET_HEADER):
             return
         opcode = packet[8] | (packet[9] << 8)
-        if opcode != ARTNET_OP_DMX:
+        if opcode == ARTNET_OP_SYNC:
+            self._handle_sync(source_ip)
+            return
+        if opcode != ARTNET_OP_DMX or len(packet) < 18:
             return
         sub_uni = packet[14]
         net = packet[15]
@@ -153,7 +176,22 @@ class ArtNetReceiver(threading.Thread):
         if universe != self._universe:
             return
         length = (packet[16] << 8) | packet[17]
-        self._on_frame(packet[18 : 18 + length])
+        channels = packet[18 : 18 + length]
+        self._last_dmx_source = source_ip
+        self._check_sync_timeout()
+        if self._sync_mode:
+            self._pending_channels = channels
+        else:
+            self._on_frame(channels)
+
+    def _handle_sync(self, source_ip):
+        if self._last_dmx_source is not None and source_ip != self._last_dmx_source:
+            return
+        self._sync_mode = True
+        self._last_sync_at = time.time()
+        if self._pending_channels is not None:
+            self._on_frame(self._pending_channels)
+            self._pending_channels = None
 
 
 class DMXSimulator(threading.Thread):
