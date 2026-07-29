@@ -327,21 +327,49 @@ class Mapping:
     note: int
 
 
+def _expand_mapping_entry(m):
+    """A mapping entry is either a single mapping (dmx_channel/note) or a
+    range (dmx_channel_start/dmx_channel_end/note_start), which expands to
+    one Mapping per channel, with notes assigned consecutively starting at
+    note_start."""
+    midi_channel = int(m["midi_channel"])
+    if not 1 <= midi_channel <= 16:
+        raise ValueError(f"midi_channel out of range (1-16): {midi_channel}")
+
+    if "dmx_channel" in m:
+        dmx_channel = int(m["dmx_channel"])
+        note = int(m["note"])
+        if not 1 <= dmx_channel <= 512:
+            raise ValueError(f"dmx_channel out of range (1-512): {dmx_channel}")
+        if not 0 <= note <= 127:
+            raise ValueError(f"note out of range (0-127): {note}")
+        return [Mapping(dmx_channel, midi_channel, note)]
+
+    start = int(m["dmx_channel_start"])
+    end = int(m["dmx_channel_end"])
+    note_start = int(m["note_start"])
+    if not 1 <= start <= 512 or not 1 <= end <= 512:
+        raise ValueError(f"dmx_channel range out of range (1-512): {start}-{end}")
+    if start > end:
+        raise ValueError(f"dmx_channel_start ({start}) must be <= dmx_channel_end ({end})")
+    count = end - start + 1
+    note_end = note_start + count - 1
+    if not 0 <= note_start <= 127 or not 0 <= note_end <= 127:
+        raise ValueError(
+            f"note range out of range (0-127): {note_start}-{note_end} "
+            f"(from note_start={note_start} over {count} channels)"
+        )
+    return [
+        Mapping(start + i, midi_channel, note_start + i) for i in range(count)
+    ]
+
+
 def load_config(path):
     with open(path) as f:
         cfg = yaml.safe_load(f) or {}
     mappings = []
     for m in cfg.get("mappings", []):
-        dmx_channel = int(m["dmx_channel"])
-        midi_channel = int(m["midi_channel"])
-        note = int(m["note"])
-        if not 1 <= dmx_channel <= 512:
-            raise ValueError(f"dmx_channel out of range (1-512): {dmx_channel}")
-        if not 1 <= midi_channel <= 16:
-            raise ValueError(f"midi_channel out of range (1-16): {midi_channel}")
-        if not 0 <= note <= 127:
-            raise ValueError(f"note out of range (0-127): {note}")
-        mappings.append(Mapping(dmx_channel, midi_channel, note))
+        mappings.extend(_expand_mapping_entry(m))
     return cfg, mappings
 
 

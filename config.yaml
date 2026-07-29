@@ -37,16 +37,27 @@ midi:
 # Behavior: when a mapped channel's value changes and is > 0, a Note On is
 # sent with velocity scaled from the DMX value (1-255 -> 1-127). When the
 # value changes to 0, a Note Off is sent.
+#
+# Each entry is either a single mapping (dmx_channel/note), or a range
+# (dmx_channel_start/dmx_channel_end/note_start) that expands to one
+# mapping per channel, with notes assigned consecutively starting at
+# note_start. e.g. dmx_channel_start: 1, dmx_channel_end: 16, note_start: 60
+# maps channel 1->note 60, channel 2->note 61, ..., channel 16->note 75.
 mappings:
-  - dmx_channel: 1
+  # - dmx_channel: 1
+  #   midi_channel: 1
+  #   note: 60
+  # - dmx_channel: 2
+  #   midi_channel: 1
+  #   note: 61
+  # - dmx_channel: 3
+  #   midi_channel: 1
+  #   note: 62
+  # - dmx_channel: 4
+  #   midi_channel: 1
+  #   note: 63
+
+  - dmx_channel_start: 1
+    dmx_channel_end: 127
     midi_channel: 1
-    note: 60
-  - dmx_channel: 2
-    midi_channel: 1
-    note: 61
-  - dmx_channel: 3
-    midi_channel: 1
-    note: 62
-  - dmx_channel: 4
-    midi_channel: 1
-    note: 63
+    note_start: 0   # ch1→note60, ch2→note61, ..., ch16→note75

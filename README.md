@@ -52,9 +52,18 @@ mappings:
   - dmx_channel: 1    # 1-512
     midi_channel: 1   # 1-16
     note: 60          # 0-127
+
+  # Range form: expands to one mapping per channel, with notes assigned
+  # consecutively starting at note_start. This maps channel 1->note 60,
+  # channel 2->note 61, ..., channel 16->note 75.
+  - dmx_channel_start: 1
+    dmx_channel_end: 16
+    midi_channel: 1
+    note_start: 60
 ```
 
-Add as many entries under `mappings:` as you need. Each is independent.
+Add as many entries under `mappings:` as you need. Each is independent, and
+you can freely mix single mappings and range mappings in the same list.
 
 ## Usage
 
@@ -177,9 +186,16 @@ mappings:
   - dmx_channel: 1    # 1-512
     midi_channel: 1   # 1-16
     note: 60          # 0-127
+
+  # レンジ指定：チャンネルごとに1つずつ展開され、note_startから連番でノートが
+  # 割り当てられます。この例ではch1→note60, ch2→note61, ..., ch16→note75。
+  - dmx_channel_start: 1
+    dmx_channel_end: 16
+    midi_channel: 1
+    note_start: 60
 ```
 
-`mappings:`の下に必要な数だけエントリを追加できます。それぞれ独立して動作します。
+`mappings:`の下に必要な数だけエントリを追加できます。それぞれ独立して動作し、単発指定とレンジ指定は同じリスト内で自由に混在できます。
 
 ## 使い方
 
