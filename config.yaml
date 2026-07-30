@@ -41,7 +41,7 @@ midi:
   # mapped channel, even if it hasn't changed. Useful as a keep-alive for
   # receivers that might miss a message or reset their own state.
   periodic_resend:
-    enabled: false
+    enabled: true
     interval: 1.0   # seconds between resends
 
 # DMX channel -> MIDI note mapping.

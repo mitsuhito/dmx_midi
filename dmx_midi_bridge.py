@@ -1001,25 +1001,29 @@ def main():
     signal.signal(signal.SIGTERM, _handle_stop_signal)
 
     logger.info("Bridge running. Press Ctrl+C to stop.")
-    while True:
-        if stop_requested.is_set() or (ui and ui.is_stopped()):
-            break
-        time.sleep(0.5)
-
-    source.stop()
-    source.join(timeout=2)
-    if resender:
-        resender.stop()
-        resender.join(timeout=2)
-    processor.stop()
-    processor.join(timeout=2)
-    frame_logger.stop()
-    frame_logger.join(timeout=2)
-    if ui:
-        ui.stop()
-    send_all_notes_off(midi_out)
-    midi_out.close()
-    logger.info("Stopped.")
+    try:
+        while True:
+            if stop_requested.is_set() or (ui and ui.is_stopped()):
+                break
+            time.sleep(0.5)
+    finally:
+        # In a `finally` so the all-notes-off flush below always runs, even
+        # if something raises an unexpected exception in the loop above --
+        # not just on a clean stop-signal exit.
+        source.stop()
+        source.join(timeout=2)
+        if resender:
+            resender.stop()
+            resender.join(timeout=2)
+        processor.stop()
+        processor.join(timeout=2)
+        frame_logger.stop()
+        frame_logger.join(timeout=2)
+        if ui:
+            ui.stop()
+        send_all_notes_off(midi_out)
+        midi_out.close()
+        logger.info("Stopped.")
 
 
 if __name__ == "__main__":
