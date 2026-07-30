@@ -418,6 +418,7 @@ class MidiBridge:
         self._mappings = mappings
         self._last_values = {}
         self._on_message = on_message
+        self._lock = threading.Lock()
 
     @staticmethod
     def _scale_velocity(value):
@@ -425,29 +426,39 @@ class MidiBridge:
             return 0
         return max(1, round(value * 127 / 255))
 
+    def _build_message(self, midi_channel, note, value):
+        midi_ch = midi_channel - 1
+        if value > 0:
+            return mido.Message(
+                "note_on", channel=midi_ch, note=note, velocity=self._scale_velocity(value)
+            )
+        return mido.Message("note_off", channel=midi_ch, note=note, velocity=0)
+
     def on_dmx_frame(self, channels):
         for m in self._mappings:
             idx = m.dmx_channel - 1
             if idx >= len(channels):
                 continue
             value = channels[idx]
-            if self._last_values.get(m.dmx_channel) == value:
-                continue
-            self._last_values[m.dmx_channel] = value
-            midi_ch = m.midi_channel - 1
-            if value > 0:
-                msg = mido.Message(
-                    "note_on",
-                    channel=midi_ch,
-                    note=m.note,
-                    velocity=self._scale_velocity(value),
-                )
-            else:
-                msg = mido.Message(
-                    "note_off", channel=midi_ch, note=m.note, velocity=0
-                )
-            self._out.send(msg)
+            with self._lock:
+                if self._last_values.get(m.dmx_channel) == value:
+                    continue
+                self._last_values[m.dmx_channel] = value
+                msg = self._build_message(m.midi_channel, m.note, value)
+                self._out.send(msg)
             logger.debug("DMX ch%d=%d -> %s", m.dmx_channel, value, msg)
+            if self._on_message is not None:
+                self._on_message(m, value, msg)
+
+    def resend_all(self):
+        """Re-sends the current Note On/Off state for every mapped channel,
+        regardless of whether it changed. Used by PeriodicResender."""
+        for m in self._mappings:
+            with self._lock:
+                value = self._last_values.get(m.dmx_channel, 0)
+                msg = self._build_message(m.midi_channel, m.note, value)
+                self._out.send(msg)
+            logger.debug("DMX ch%d=%d -> %s (periodic resend)", m.dmx_channel, value, msg)
             if self._on_message is not None:
                 self._on_message(m, value, msg)
 
@@ -693,6 +704,30 @@ class ConsoleUI:
         stdscr.refresh()
 
 
+class PeriodicResender(threading.Thread):
+    """Periodically re-sends the current Note On/Off state for every mapped
+    channel, regardless of whether it changed since last time. This is a
+    keep-alive for MIDI receivers that might miss a message or reset their
+    own state -- mirroring how DMX/Art-Net senders periodically
+    re-transmit unchanged data (see AsyncFrameLogger/ArtDmx keep-alive)."""
+
+    def __init__(self, bridge, interval):
+        super().__init__(daemon=True)
+        self._bridge = bridge
+        self._interval = interval
+        self._stop_event = threading.Event()
+
+    def stop(self):
+        self._stop_event.set()
+
+    def run(self):
+        while not self._stop_event.wait(self._interval):
+            try:
+                self._bridge.resend_all()
+            except Exception:
+                logger.exception("Error during periodic MIDI resend")
+
+
 class LatestFrameProcessor(threading.Thread):
     """Runs frame handling (debug logging + MIDI send) on its own thread,
     decoupled from whatever is receiving raw frames (serial or UDP socket).
@@ -930,6 +965,13 @@ def main():
         callbacks.append(ui.on_frame)
     on_frame = fan_out(*callbacks)
 
+    resend_cfg = cfg.get("midi", {}).get("periodic_resend", {})
+    resender = None
+    if resend_cfg.get("enabled", False):
+        interval = float(resend_cfg.get("interval", 1.0))
+        resender = PeriodicResender(bridge, interval)
+        logger.info("Periodic MIDI resend enabled, every %.2fs", interval)
+
     if args.simulate:
         channels = sorted({m.dmx_channel for m in mappings}) or [1]
         source = DMXSimulator(on_frame, channels)
@@ -938,6 +980,8 @@ def main():
 
     frame_logger.start()
     processor.start()
+    if resender:
+        resender.start()
     if ui:
         ui.start()
     source.start()
@@ -964,6 +1008,9 @@ def main():
 
     source.stop()
     source.join(timeout=2)
+    if resender:
+        resender.stop()
+        resender.join(timeout=2)
     processor.stop()
     processor.join(timeout=2)
     frame_logger.stop()

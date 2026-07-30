@@ -37,6 +37,13 @@ midi:
   # port instead of exiting.
   fallback_to_virtual: true
 
+  # Optional: periodically re-send the current Note On/Off state for every
+  # mapped channel, even if it hasn't changed. Useful as a keep-alive for
+  # receivers that might miss a message or reset their own state.
+  periodic_resend:
+    enabled: false
+    interval: 1.0   # seconds between resends
+
 # DMX channel -> MIDI note mapping.
 # - dmx_channel: 1-512
 # - midi_channel: 1-16
