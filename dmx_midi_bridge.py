@@ -397,9 +397,27 @@ def open_midi_output(midi_cfg):
     return mido.open_output(matches[0])
 
 
+# Physical MIDI OUT (5-pin DIN, e.g. behind a USB-MIDI adapter) is a
+# fixed 31250 baud serial line regardless of how fast the USB side is.
+# 10 bits/byte (8 data + start + stop).
+_MIDI_BAUD_RATE = 31250
+_MIDI_BYTES_PER_NOTE_MESSAGE = 3
+_ALL_NOTES_OFF_MESSAGE_COUNT = 16 * 128
+ALL_NOTES_OFF_DRAIN_SECONDS = (
+    _ALL_NOTES_OFF_MESSAGE_COUNT * _MIDI_BYTES_PER_NOTE_MESSAGE * 10
+) / _MIDI_BAUD_RATE
+
+
 def send_all_notes_off(midi_out):
     """Sends Note Off for every note (0-127) on every MIDI channel (0-15),
-    to clear any stuck notes. Called at startup and shutdown."""
+    to clear any stuck notes. Called at startup and shutdown.
+
+    `midi_out.send()` only queues each message; on real hardware behind a
+    USB-MIDI adapter, physically transmitting all ALL_NOTES_OFF_MESSAGE_COUNT
+    of them takes about ALL_NOTES_OFF_DRAIN_SECONDS. Callers that are about
+    to close the port right after (i.e. on shutdown) must sleep for that
+    long first, or the tail of this flush can be lost when the port closes
+    mid-transmission."""
     for channel in range(16):
         for note in range(128):
             midi_out.send(mido.Message("note_off", channel=channel, note=note, velocity=0))
@@ -1022,6 +1040,10 @@ def main():
         if ui:
             ui.stop()
         send_all_notes_off(midi_out)
+        # Give real hardware time to physically finish transmitting the
+        # flush above before the port goes away (see ALL_NOTES_OFF_DRAIN_
+        # SECONDS) -- otherwise closing right away can cut it off mid-burst.
+        time.sleep(ALL_NOTES_OFF_DRAIN_SECONDS)
         midi_out.close()
         logger.info("Stopped.")
 
