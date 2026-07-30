@@ -2,8 +2,11 @@
 
 input:
   # Which DMX input to use: "usb" (Enttec DMX USB Pro) or "artnet".
-  #mode: usb
-  mode: artnet
+  mode: usb
+  #mode: artnet
+  # If mode is "usb" but the serial port can't be opened, fall back to
+  # Art-Net (using the artnet: settings below) instead of exiting.
+  fallback_to_artnet: true
 
 serial:
   # Used when input.mode is "usb".
@@ -27,8 +30,12 @@ midi:
   # can connect to (good for testing without hardware).
   # Otherwise, set this to a substring of the target MIDI output port name
   # (see `python3 dmx_midi_bridge.py --list-midi-ports`), e.g. "USB MIDI".
-  output: virtual
-  virtual_port_name: "DMX2MIDI"
+  # output: virtual
+  # virtual_port_name: "DMX2MIDI"
+  output: UM-1
+  # If output doesn't match any available port, fall back to a virtual
+  # port instead of exiting.
+  fallback_to_virtual: true
 
 # DMX channel -> MIDI note mapping.
 # - dmx_channel: 1-512
@@ -44,20 +51,25 @@ midi:
 # note_start. e.g. dmx_channel_start: 1, dmx_channel_end: 16, note_start: 60
 # maps channel 1->note 60, channel 2->note 61, ..., channel 16->note 75.
 mappings:
-  # - dmx_channel: 1
-  #   midi_channel: 1
-  #   note: 60
-  # - dmx_channel: 2
-  #   midi_channel: 1
-  #   note: 61
-  # - dmx_channel: 3
-  #   midi_channel: 1
-  #   note: 62
-  # - dmx_channel: 4
-  #   midi_channel: 1
-  #   note: 63
-
+  # Full 512-channel coverage, split evenly into 4 blocks of 128 channels
+  # each, one per MIDI channel. note_start:0 gives exactly 128 note slots
+  # (0-127), matching 128 channels per block with no leftover.
   - dmx_channel_start: 1
-    dmx_channel_end: 127
+    dmx_channel_end: 128
     midi_channel: 1
-    note_start: 0   # ch1→note60, ch2→note61, ..., ch16→note75
+    note_start: 0   # ch1→note0, ch2→note1, ..., ch128→note127
+
+  - dmx_channel_start: 129
+    dmx_channel_end: 256
+    midi_channel: 2
+    note_start: 0   # ch129→note0, ..., ch256→note127
+
+  - dmx_channel_start: 257
+    dmx_channel_end: 384
+    midi_channel: 3
+    note_start: 0   # ch257→note0, ..., ch384→note127
+
+  - dmx_channel_start: 385
+    dmx_channel_end: 512
+    midi_channel: 4
+    note_start: 0   # ch385→note0, ..., ch512→note127

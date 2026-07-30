@@ -375,16 +375,33 @@ def load_config(path):
 
 def open_midi_output(midi_cfg):
     output = midi_cfg.get("output", "virtual")
+    virtual_name = midi_cfg.get("virtual_port_name", "DMX2MIDI")
     if output == "virtual":
-        name = midi_cfg.get("virtual_port_name", "DMX2MIDI")
-        return mido.open_output(name, virtual=True)
+        return mido.open_output(virtual_name, virtual=True)
     available = mido.get_output_names()
     matches = [p for p in available if output in p]
     if not matches:
-        raise RuntimeError(
-            f"No MIDI output port matching '{output}'. Available ports: {available}"
+        if not midi_cfg.get("fallback_to_virtual", True):
+            raise RuntimeError(
+                f"No MIDI output port matching '{output}'. Available ports: {available}"
+            )
+        logger.warning(
+            "No MIDI output port matching '%s' (available: %s); "
+            "falling back to virtual port '%s'",
+            output,
+            available,
+            virtual_name,
         )
+        return mido.open_output(virtual_name, virtual=True)
     return mido.open_output(matches[0])
+
+
+def send_all_notes_off(midi_out):
+    """Sends Note Off for every note (0-127) on every MIDI channel (0-15),
+    to clear any stuck notes. Called at startup and shutdown."""
+    for channel in range(16):
+        for note in range(128):
+            midi_out.send(mido.Message("note_off", channel=channel, note=note, velocity=0))
 
 
 class MidiBridge:
@@ -808,21 +825,38 @@ def fan_out(*callbacks):
     return dispatch
 
 
+def _build_artnet_source(cfg, on_frame):
+    artnet_cfg = cfg.get("artnet", {})
+    return ArtNetReceiver(
+        on_frame,
+        bind_address=artnet_cfg.get("bind_address", "0.0.0.0"),
+        port=artnet_cfg.get("port", 6454),
+        universe=artnet_cfg.get("universe", 0),
+    )
+
+
 def build_dmx_source(cfg, on_frame):
-    mode = cfg.get("input", {}).get("mode", "usb")
+    input_cfg = cfg.get("input", {})
+    mode = input_cfg.get("mode", "usb")
     if mode == "usb":
         serial_cfg = cfg.get("serial", {})
-        return EnttecDMXReader(
-            serial_cfg["port"], serial_cfg.get("baudrate", 57600), on_frame
-        )
+        port = serial_cfg["port"]
+        baudrate = serial_cfg.get("baudrate", 57600)
+        try:
+            probe = serial.Serial(port, baudrate)
+            probe.close()
+        except serial.SerialException as e:
+            if not input_cfg.get("fallback_to_artnet", True):
+                raise
+            logger.warning(
+                "Could not open USB serial port '%s' (%s); falling back to Art-Net",
+                port,
+                e,
+            )
+            return _build_artnet_source(cfg, on_frame)
+        return EnttecDMXReader(port, baudrate, on_frame)
     if mode == "artnet":
-        artnet_cfg = cfg.get("artnet", {})
-        return ArtNetReceiver(
-            on_frame,
-            bind_address=artnet_cfg.get("bind_address", "0.0.0.0"),
-            port=artnet_cfg.get("port", 6454),
-            universe=artnet_cfg.get("universe", 0),
-        )
+        return _build_artnet_source(cfg, on_frame)
     raise ValueError(f"Unknown input.mode '{mode}' (expected 'usb' or 'artnet')")
 
 
@@ -882,6 +916,7 @@ def main():
 
     midi_out = open_midi_output(cfg.get("midi", {}))
     logger.info("MIDI output ready: %s", midi_out.name)
+    send_all_notes_off(midi_out)
 
     mode_label = "simulate" if args.simulate else cfg.get("input", {}).get("mode", "usb")
     ui = ConsoleUI(mappings, mode_label, midi_out.name) if args.ui else None
@@ -922,6 +957,7 @@ def main():
         frame_logger.join(timeout=2)
         if ui:
             ui.stop()
+        send_all_notes_off(midi_out)
         midi_out.close()
         logger.info("Stopped.")
 

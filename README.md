@@ -136,6 +136,32 @@ turning notes off. Art-Net's own spec calls this per-node behavior
 but implementing it is optional and not something senders guarantee. This
 bridge does not currently implement a receive-timeout fallback.
 
+### Running as a systemd service (always on)
+
+`dmx-midi-bridge.service` is included for running the bridge persistently
+in the background, starting on boot and restarting automatically if it
+exits. It runs as the `pi` user (already in the `dialout` and `audio`
+groups needed for serial/MIDI access) without `--ui`, since a systemd
+service has no terminal for curses to use — check on it via the journal
+instead.
+
+```bash
+sudo cp dmx-midi-bridge.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now dmx-midi-bridge
+
+# status / logs
+sudo systemctl status dmx-midi-bridge
+journalctl -u dmx-midi-bridge -f
+
+# stop / restart
+sudo systemctl stop dmx-midi-bridge
+sudo systemctl restart dmx-midi-bridge
+```
+
+Edit the `ExecStart=` line in the service file first if your checkout
+isn't at `/home/pi/dmx_midi`.
+
 ---
 
 # DMX → MIDI ブリッジ
@@ -254,3 +280,23 @@ tmux new -s dmxbridge
 ### 既知の制限：受信途絶時のタイムアウトがない
 
 このブリッジは、新しいDMXフレームが実際に届いた時だけ状態を更新します。送信元(QLC+など)が(全チャンネル0のフレームを送るのではなく)**送信そのものを完全に停止**した場合——たとえばQLC+のBlackoutを使った時——ブリッジ側にはそれを知る手段がなく、最後に受信した値を保持し続けてしまいます(Note Offになりません)。Art-Netの規格自体はノード側のこの挙動を「Failsafe state」と呼び、「全出力を0にする」を選択肢の一つとして明示していますが、実装は任意であり、送信側がそれを保証するものでもありません。このブリッジは現状、受信タイムアウトによるフォールバックを実装していません。
+
+### systemdサービスとして常時起動する
+
+`dmx-midi-bridge.service`を使うと、ブリッジをバックグラウンドで常時起動し、起動時に自動開始、異常終了時には自動再起動させられます。`pi`ユーザーで動作します(シリアル/MIDIアクセスに必要な`dialout`・`audio`グループに既に所属)。systemdサービスにはcurses用の端末がないため`--ui`は使いません。状態確認はjournalを使ってください。
+
+```bash
+sudo cp dmx-midi-bridge.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now dmx-midi-bridge
+
+# 状態確認・ログ
+sudo systemctl status dmx-midi-bridge
+journalctl -u dmx-midi-bridge -f
+
+# 停止・再起動
+sudo systemctl stop dmx-midi-bridge
+sudo systemctl restart dmx-midi-bridge
+```
+
+`/home/pi/dmx_midi`以外に配置している場合は、先にサービスファイルの`ExecStart=`行を書き換えてください。
