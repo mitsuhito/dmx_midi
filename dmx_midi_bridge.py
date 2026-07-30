@@ -399,28 +399,29 @@ def open_midi_output(midi_cfg):
 
 # Physical MIDI OUT (5-pin DIN, e.g. behind a USB-MIDI adapter) is a
 # fixed 31250 baud serial line regardless of how fast the USB side is.
-# 10 bits/byte (8 data + start + stop).
+# 10 bits/byte (8 data + start + stop). If messages are queued faster than
+# this, a non-blocking driver/adapter can silently drop the overflow --
+# waiting before close() doesn't help, since the drop already happened at
+# send() time. So each send is paced to this real wire rate instead.
 _MIDI_BAUD_RATE = 31250
 _MIDI_BYTES_PER_NOTE_MESSAGE = 3
+_MIDI_MESSAGE_SEND_INTERVAL = (_MIDI_BYTES_PER_NOTE_MESSAGE * 10) / _MIDI_BAUD_RATE
 _ALL_NOTES_OFF_MESSAGE_COUNT = 16 * 128
-ALL_NOTES_OFF_DRAIN_SECONDS = (
-    _ALL_NOTES_OFF_MESSAGE_COUNT * _MIDI_BYTES_PER_NOTE_MESSAGE * 10
-) / _MIDI_BAUD_RATE
+ALL_NOTES_OFF_DRAIN_SECONDS = _ALL_NOTES_OFF_MESSAGE_COUNT * _MIDI_MESSAGE_SEND_INTERVAL
 
 
 def send_all_notes_off(midi_out):
     """Sends Note Off for every note (0-127) on every MIDI channel (0-15),
     to clear any stuck notes. Called at startup and shutdown.
 
-    `midi_out.send()` only queues each message; on real hardware behind a
-    USB-MIDI adapter, physically transmitting all ALL_NOTES_OFF_MESSAGE_COUNT
-    of them takes about ALL_NOTES_OFF_DRAIN_SECONDS. Callers that are about
-    to close the port right after (i.e. on shutdown) must sleep for that
-    long first, or the tail of this flush can be lost when the port closes
-    mid-transmission."""
+    Each send is paced by _MIDI_MESSAGE_SEND_INTERVAL (real wire time for
+    one message) rather than fired in a tight loop, so a real MIDI
+    interface's send buffer never gets more thrown at it than it can
+    physically drain -- this takes ALL_NOTES_OFF_DRAIN_SECONDS in total."""
     for channel in range(16):
         for note in range(128):
             midi_out.send(mido.Message("note_off", channel=channel, note=note, velocity=0))
+            time.sleep(_MIDI_MESSAGE_SEND_INTERVAL)
 
 
 class MidiBridge:
@@ -964,6 +965,19 @@ def main():
             print(name)
         return
 
+    # Registered before any slow startup work (e.g. the paced all-notes-off
+    # flush below can take ~2s) so that a SIGTERM/SIGINT arriving during
+    # startup is caught immediately rather than falling through to
+    # Python's default disposition (instant, uncatchable termination)
+    # before our handler even exists.
+    stop_requested = threading.Event()
+
+    def _handle_stop_signal(signum, frame):
+        stop_requested.set()
+
+    signal.signal(signal.SIGINT, _handle_stop_signal)
+    signal.signal(signal.SIGTERM, _handle_stop_signal)
+
     cfg, mappings = load_config(args.config)
     if not mappings:
         logger.warning("No mappings configured; nothing will be sent to MIDI.")
@@ -1003,21 +1017,12 @@ def main():
     if ui:
         ui.start()
     source.start()
-    # Handle both Ctrl+C (SIGINT) and `systemctl stop` (SIGTERM) the same
-    # way: set a flag and let the main loop exit normally into the cleanup
-    # below. A plain `except KeyboardInterrupt` only catches SIGINT, so
-    # SIGTERM would otherwise kill the process immediately and skip the
-    # all-notes-off flush entirely. Handling the signal (rather than
-    # relying on an exception) also means a second Ctrl+C during shutdown
-    # can't cut the cleanup below short.
-    stop_requested = threading.Event()
-
-    def _handle_stop_signal(signum, frame):
-        stop_requested.set()
-
-    signal.signal(signal.SIGINT, _handle_stop_signal)
-    signal.signal(signal.SIGTERM, _handle_stop_signal)
-
+    # stop_requested/signal handlers were registered near the top of main()
+    # (before any slow startup work), so SIGINT/SIGTERM are already being
+    # caught here -- this just starts watching for them. A plain
+    # `except KeyboardInterrupt` would only catch SIGINT, and letting an
+    # exception (rather than a handler) drive shutdown would let a second
+    # Ctrl+C cut the cleanup below short.
     logger.info("Bridge running. Press Ctrl+C to stop.")
     try:
         while True:
@@ -1040,10 +1045,11 @@ def main():
         if ui:
             ui.stop()
         send_all_notes_off(midi_out)
-        # Give real hardware time to physically finish transmitting the
-        # flush above before the port goes away (see ALL_NOTES_OFF_DRAIN_
-        # SECONDS) -- otherwise closing right away can cut it off mid-burst.
-        time.sleep(ALL_NOTES_OFF_DRAIN_SECONDS)
+        # send_all_notes_off already paces each message to real wire speed,
+        # so by the time it returns the bytes are queued at the rate the
+        # hardware can drain them; this just covers the last message's
+        # residual buffering before the port goes away.
+        time.sleep(_MIDI_MESSAGE_SEND_INTERVAL * 4)
         midi_out.close()
         logger.info("Stopped.")
 
