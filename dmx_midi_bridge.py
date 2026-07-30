@@ -410,42 +410,6 @@ _ALL_NOTES_OFF_MESSAGE_COUNT = 16 * 128
 ALL_NOTES_OFF_DRAIN_SECONDS = _ALL_NOTES_OFF_MESSAGE_COUNT * _MIDI_MESSAGE_SEND_INTERVAL
 
 
-def send_all_notes_off(midi_out):
-    """Sends Note Off for every note (0-127) on every MIDI channel (0-15),
-    to clear any stuck notes. Called at startup and shutdown.
-
-    Each send is paced by _MIDI_MESSAGE_SEND_INTERVAL (real wire time for
-    one message) rather than fired in a tight loop, so a real MIDI
-    interface's send buffer never gets more thrown at it than it can
-    physically drain -- this takes ALL_NOTES_OFF_DRAIN_SECONDS in total."""
-    logger.info(
-        "Sending all-notes-off flush (%d messages) to %s ...",
-        _ALL_NOTES_OFF_MESSAGE_COUNT,
-        midi_out.name,
-    )
-    sent = 0
-    try:
-        for channel in range(16):
-            for note in range(128):
-                midi_out.send(mido.Message("note_off", channel=channel, note=note, velocity=0))
-                sent += 1
-                time.sleep(_MIDI_MESSAGE_SEND_INTERVAL)
-    except Exception:
-        # Best-effort: log clearly and move on rather than crashing the
-        # whole program (e.g. on startup) over a failed cleanup flush.
-        logger.exception(
-            "all-notes-off flush failed after %d/%d messages",
-            sent,
-            _ALL_NOTES_OFF_MESSAGE_COUNT,
-        )
-    else:
-        logger.info(
-            "all-notes-off flush complete: sent %d/%d messages",
-            sent,
-            _ALL_NOTES_OFF_MESSAGE_COUNT,
-        )
-
-
 class MidiBridge:
     """Turns DMX channel value changes into MIDI note on/off messages.
 
@@ -507,6 +471,58 @@ class MidiBridge:
             logger.debug("DMX ch%d=%d -> %s (periodic resend)", m.dmx_channel, value, msg)
             if self._on_message is not None:
                 self._on_message(m, value, msg)
+
+    def send_all_notes_off(self):
+        """Sends Note Off for every note (0-127) on every MIDI channel
+        (0-15), to clear any stuck notes, then resets internal state to
+        all-off. Called at startup and shutdown.
+
+        Held under self._lock for its whole duration (same lock as
+        on_dmx_frame/resend_all): if a resend or DMX-triggered send is
+        still in flight when this starts (e.g. a resend thread that
+        didn't stop in time), it will block until this finishes rather
+        than interleave with it -- and by the time it gets the lock,
+        _last_values has already been reset to 0, so it can only send
+        redundant Note Offs, never resurrect a stale Note On right after
+        this flush. This is what actually fixes the "periodic resend
+        undoes the flush" race; pacing/join-timeouts alone weren't enough.
+
+        Each send is paced by _MIDI_MESSAGE_SEND_INTERVAL (real wire time
+        for one message) rather than fired in a tight loop, so a real
+        MIDI interface's send buffer never gets more thrown at it than it
+        can physically drain -- this takes ALL_NOTES_OFF_DRAIN_SECONDS in
+        total."""
+        logger.info(
+            "Sending all-notes-off flush (%d messages) to %s ...",
+            _ALL_NOTES_OFF_MESSAGE_COUNT,
+            self._out.name,
+        )
+        sent = 0
+        try:
+            with self._lock:
+                for channel in range(16):
+                    for note in range(128):
+                        self._out.send(
+                            mido.Message("note_off", channel=channel, note=note, velocity=0)
+                        )
+                        sent += 1
+                        time.sleep(_MIDI_MESSAGE_SEND_INTERVAL)
+                for m in self._mappings:
+                    self._last_values[m.dmx_channel] = 0
+        except Exception:
+            # Best-effort: log clearly and move on rather than crashing the
+            # whole program (e.g. on startup) over a failed cleanup flush.
+            logger.exception(
+                "all-notes-off flush failed after %d/%d messages",
+                sent,
+                _ALL_NOTES_OFF_MESSAGE_COUNT,
+            )
+        else:
+            logger.info(
+                "all-notes-off flush complete: sent %d/%d messages",
+                sent,
+                _ALL_NOTES_OFF_MESSAGE_COUNT,
+            )
 
 
 class ConsoleUI:
@@ -1011,12 +1027,12 @@ def main():
 
     midi_out = open_midi_output(cfg.get("midi", {}))
     logger.info("MIDI output ready: %s", midi_out.name)
-    send_all_notes_off(midi_out)
 
     mode_label = "simulate" if args.simulate else cfg.get("input", {}).get("mode", "usb")
     ui = ConsoleUI(mappings, mode_label, midi_out.name) if args.ui else None
 
     bridge = MidiBridge(midi_out, mappings, on_message=ui.on_message if ui else None)
+    bridge.send_all_notes_off()
     processor = LatestFrameProcessor(bridge.on_dmx_frame)
     frame_logger = AsyncFrameLogger()
     callbacks = [frame_logger.submit, processor.submit]
@@ -1085,7 +1101,7 @@ def main():
         _stop_and_join(frame_logger, "frame_logger", 2)
         if ui:
             ui.stop()
-        send_all_notes_off(midi_out)
+        bridge.send_all_notes_off()
         # send_all_notes_off already paces each message to real wire speed,
         # so by the time it returns the bytes are queued at the rate the
         # hardware can drain them; this just covers the last message's
