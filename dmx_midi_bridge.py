@@ -471,12 +471,17 @@ class MidiBridge:
 
     def resend_all(self):
         """Re-sends the current Note On/Off state for every mapped channel,
-        regardless of whether it changed. Used by PeriodicResender."""
+        regardless of whether it changed. Used by PeriodicResender.
+
+        Paced the same way as send_all_notes_off, for the same reason: a
+        non-blocking real MIDI interface can silently drop messages sent
+        faster than it can drain them."""
         for m in self._mappings:
             with self._lock:
                 value = self._last_values.get(m.dmx_channel, 0)
                 msg = self._build_message(m.midi_channel, m.note, value)
                 self._out.send(msg)
+            time.sleep(_MIDI_MESSAGE_SEND_INTERVAL)
             logger.debug("DMX ch%d=%d -> %s (periodic resend)", m.dmx_channel, value, msg)
             if self._on_message is not None:
                 self._on_message(m, value, msg)
@@ -1033,15 +1038,29 @@ def main():
         # In a `finally` so the all-notes-off flush below always runs, even
         # if something raises an unexpected exception in the loop above --
         # not just on a clean stop-signal exit.
-        source.stop()
-        source.join(timeout=2)
+        #
+        # resender/processor get a generous timeout and an explicit
+        # is_alive() check: both can call midi_out.send(), so if either is
+        # still mid-send when we fall through to send_all_notes_off below,
+        # it can race with (or immediately undo) the shutdown flush. A
+        # short timeout that's silently ignored on failure was exactly
+        # that hole; log loudly instead of guessing it's fine.
+        def _stop_and_join(thread, name, timeout):
+            thread.stop()
+            thread.join(timeout=timeout)
+            if thread.is_alive():
+                logger.warning(
+                    "%s thread did not stop within %.1fs; it may still be "
+                    "sending MIDI, which can race with the shutdown flush",
+                    name,
+                    timeout,
+                )
+
+        _stop_and_join(source, "source", 2)
         if resender:
-            resender.stop()
-            resender.join(timeout=2)
-        processor.stop()
-        processor.join(timeout=2)
-        frame_logger.stop()
-        frame_logger.join(timeout=2)
+            _stop_and_join(resender, "resender", 5)
+        _stop_and_join(processor, "processor", 5)
+        _stop_and_join(frame_logger, "frame_logger", 2)
         if ui:
             ui.stop()
         send_all_notes_off(midi_out)
