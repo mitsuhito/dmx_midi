@@ -16,6 +16,7 @@ import curses
 import logging
 import queue
 import random
+import signal
 import socket
 import threading
 import time
@@ -940,26 +941,38 @@ def main():
     if ui:
         ui.start()
     source.start()
+    # Handle both Ctrl+C (SIGINT) and `systemctl stop` (SIGTERM) the same
+    # way: set a flag and let the main loop exit normally into the cleanup
+    # below. A plain `except KeyboardInterrupt` only catches SIGINT, so
+    # SIGTERM would otherwise kill the process immediately and skip the
+    # all-notes-off flush entirely. Handling the signal (rather than
+    # relying on an exception) also means a second Ctrl+C during shutdown
+    # can't cut the cleanup below short.
+    stop_requested = threading.Event()
+
+    def _handle_stop_signal(signum, frame):
+        stop_requested.set()
+
+    signal.signal(signal.SIGINT, _handle_stop_signal)
+    signal.signal(signal.SIGTERM, _handle_stop_signal)
+
     logger.info("Bridge running. Press Ctrl+C to stop.")
-    try:
-        while True:
-            if ui and ui.is_stopped():
-                break
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        source.stop()
-        source.join(timeout=2)
-        processor.stop()
-        processor.join(timeout=2)
-        frame_logger.stop()
-        frame_logger.join(timeout=2)
-        if ui:
-            ui.stop()
-        send_all_notes_off(midi_out)
-        midi_out.close()
-        logger.info("Stopped.")
+    while True:
+        if stop_requested.is_set() or (ui and ui.is_stopped()):
+            break
+        time.sleep(0.5)
+
+    source.stop()
+    source.join(timeout=2)
+    processor.stop()
+    processor.join(timeout=2)
+    frame_logger.stop()
+    frame_logger.join(timeout=2)
+    if ui:
+        ui.stop()
+    send_all_notes_off(midi_out)
+    midi_out.close()
+    logger.info("Stopped.")
 
 
 if __name__ == "__main__":
