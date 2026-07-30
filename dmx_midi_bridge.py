@@ -418,10 +418,32 @@ def send_all_notes_off(midi_out):
     one message) rather than fired in a tight loop, so a real MIDI
     interface's send buffer never gets more thrown at it than it can
     physically drain -- this takes ALL_NOTES_OFF_DRAIN_SECONDS in total."""
-    for channel in range(16):
-        for note in range(128):
-            midi_out.send(mido.Message("note_off", channel=channel, note=note, velocity=0))
-            time.sleep(_MIDI_MESSAGE_SEND_INTERVAL)
+    logger.info(
+        "Sending all-notes-off flush (%d messages) to %s ...",
+        _ALL_NOTES_OFF_MESSAGE_COUNT,
+        midi_out.name,
+    )
+    sent = 0
+    try:
+        for channel in range(16):
+            for note in range(128):
+                midi_out.send(mido.Message("note_off", channel=channel, note=note, velocity=0))
+                sent += 1
+                time.sleep(_MIDI_MESSAGE_SEND_INTERVAL)
+    except Exception:
+        # Best-effort: log clearly and move on rather than crashing the
+        # whole program (e.g. on startup) over a failed cleanup flush.
+        logger.exception(
+            "all-notes-off flush failed after %d/%d messages",
+            sent,
+            _ALL_NOTES_OFF_MESSAGE_COUNT,
+        )
+    else:
+        logger.info(
+            "all-notes-off flush complete: sent %d/%d messages",
+            sent,
+            _ALL_NOTES_OFF_MESSAGE_COUNT,
+        )
 
 
 class MidiBridge:
