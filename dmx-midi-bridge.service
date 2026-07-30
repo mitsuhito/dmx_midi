@@ -1,0 +1,15 @@
+[Unit]
+Description=DMX to MIDI bridge (Enttec DMX USB Pro / Art-Net -> MIDI)
+After=network.target sound.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/dmx_midi
+ExecStart=/home/pi/dmx_midi/venv/bin/python /home/pi/dmx_midi/dmx_midi_bridge.py --config /home/pi/dmx_midi/config.yaml
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
